@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+
+# Ignore local DB accidents, but keep the tracked snapshots DB for Actions/Streamlit
+*.db
+!data/
+!data/prices.db

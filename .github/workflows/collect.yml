@@ -1,0 +1,67 @@
+# Collect cross-market iPhone prices on a free-tier-safe cadence.
+#
+# Budget (designed to stay under free limits):
+#   - PricesAPI: 8 countries × 2 runs/day × 30 days ≈ 480 credits/month
+#     (5 Personal keys × 1,000 = 5,000 credits/month available)
+#   - GitHub Actions (private): ~60 jobs/month × ~10–15 min ≈ 600–900 min
+#     (free private allowance is 2,000 min/month on GitHub Free)
+#   - Git storage: SQLite stays tiny (KB–low MB); only data/prices.db is committed
+#
+# Schedule: every 12 hours UTC. Manual runs: Actions → Collect prices → Run workflow.
+
+name: Collect prices
+
+on:
+  schedule:
+    # 00:00 and 12:00 UTC → 2 cycles/day
+    - cron: "0 0,12 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: collect-prices
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run one collection cycle
+        env:
+          PRICESAPI_KEY_1: ${{ secrets.PRICESAPI_KEY_1 }}
+          PRICESAPI_KEY_2: ${{ secrets.PRICESAPI_KEY_2 }}
+          PRICESAPI_KEY_3: ${{ secrets.PRICESAPI_KEY_3 }}
+          PRICESAPI_KEY_4: ${{ secrets.PRICESAPI_KEY_4 }}
+          PRICESAPI_KEY_5: ${{ secrets.PRICESAPI_KEY_5 }}
+          EXCHANGERATE_HOST_ACCESS_KEY: ${{ secrets.EXCHANGERATE_HOST_ACCESS_KEY }}
+          DATABASE_PATH: data/prices.db
+        run: python scheduler.py --once
+
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p data
+          git add data/prices.db
+          if git diff --staged --quiet; then
+            echo "No database changes to commit."
+          else
+            git commit -m "data: update price snapshots from scheduled collection"
+            git push
+          fi
