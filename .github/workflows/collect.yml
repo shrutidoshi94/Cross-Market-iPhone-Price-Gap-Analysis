@@ -32,6 +32,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Needed so the job can push commits back to main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -53,15 +57,47 @@ jobs:
           DATABASE_PATH: data/prices.db
         run: python scheduler.py --once
 
-      - name: Commit updated database
+      - name: Commit and push updated database
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           mkdir -p data
           git add data/prices.db
           if git diff --staged --quiet; then
             echo "No database changes to commit."
-          else
-            git commit -m "data: update price snapshots from scheduled collection"
-            git push
+            exit 0
           fi
+
+          git commit -m "data: update price snapshots from scheduled collection"
+
+          # main may have moved (local push / prior Action). Rebase, then push.
+          # On binary DB conflicts, keep THIS job's newly collected database.
+          for attempt in 1 2 3; do
+            echo "Push attempt ${attempt}..."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              if git status --porcelain | grep -q "data/prices.db"; then
+                echo "Resolving prices.db conflict in favor of this collection run"
+                git checkout --theirs -- data/prices.db
+                git add data/prices.db
+                GIT_EDITOR=true git rebase --continue
+              else
+                echo "Unexpected rebase conflict"
+                git rebase --abort || true
+                exit 1
+              fi
+            fi
+
+            if git push origin HEAD:main; then
+              echo "Push succeeded"
+              exit 0
+            fi
+
+            echo "Push rejected — retrying after short wait"
+            sleep 5
+          done
+
+          echo "Failed to push after retries"
+          exit 1
