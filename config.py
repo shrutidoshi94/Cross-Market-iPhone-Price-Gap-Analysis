@@ -22,41 +22,6 @@ from dotenv import load_dotenv
 _PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
-
-def _load_streamlit_secrets_into_env() -> None:
-    """
-    On Streamlit Community Cloud, secrets live in st.secrets — not .env.
-
-    Copy known keys into os.environ so the rest of the app can keep using
-    os.getenv(...) locally, in Actions, and on Streamlit Cloud.
-    """
-    try:
-        import streamlit as st  # optional dependency at import time
-    except ImportError:
-        return
-
-    try:
-        secrets = st.secrets  # type: ignore[attr-defined]
-    except Exception:
-        return
-
-    keys = [f"PRICESAPI_KEY_{i}" for i in range(1, 6)]
-    keys.append("EXCHANGERATE_HOST_ACCESS_KEY")
-    keys.append("DATABASE_PATH")
-
-    for key in keys:
-        if key in os.environ and os.environ[key].strip():
-            continue
-        try:
-            value = secrets.get(key)  # type: ignore[attr-defined]
-        except Exception:
-            value = None
-        if value:
-            os.environ[key] = str(value)
-
-
-_load_streamlit_secrets_into_env()
-
 logger = logging.getLogger(__name__)
 
 # Product we track across markets
@@ -68,8 +33,45 @@ COUNTRY_CODES = ["US", "GB", "DE", "FR", "CA", "AU", "JP", "IN"]
 # PricesAPI.io base URL
 PRICESAPI_BASE_URL = "https://api.pricesapi.io/api/v1"
 
-# Default SQLite path (used by later modules)
-DATABASE_PATH = os.getenv("DATABASE_PATH", "data/prices.db")
+def get_env(key: str, default: str = "") -> str:
+    """
+    Read a config value from environment, then Streamlit secrets.
+
+    Order: existing os.environ → st.secrets (Community Cloud) → default.
+    Lazy so secrets work after the Streamlit runtime has started.
+    """
+    existing = os.environ.get(key, "").strip()
+    if existing:
+        return existing
+
+    try:
+        import streamlit as st
+
+        # st.secrets raises if no secrets file exists locally — that's fine
+        if key in st.secrets:
+            value = str(st.secrets[key]).strip()
+            if value:
+                os.environ[key] = value
+                return value
+    except Exception:
+        pass
+
+    return default
+
+
+def _default_database_path() -> str:
+    """Absolute path to data/prices.db so Cloud/local cwd differences don't matter."""
+    configured = get_env("DATABASE_PATH", "")
+    if configured:
+        path = Path(configured)
+        if not path.is_absolute():
+            path = _PROJECT_ROOT / path
+        return str(path)
+    return str(_PROJECT_ROOT / "data" / "prices.db")
+
+
+# Resolved at import for callers that read the constant; get_env still used in fx.py path helpers via DATABASE_PATH
+DATABASE_PATH = _default_database_path()
 
 # Rate limit: 10 requests/minute per key (project requirement)
 REQUESTS_PER_MINUTE_PER_KEY = 10
@@ -93,7 +95,7 @@ def load_api_keys() -> List[str]:
     """
     keys: List[str] = []
     for i in range(1, 6):
-        raw = os.getenv(f"PRICESAPI_KEY_{i}", "").strip()
+        raw = get_env(f"PRICESAPI_KEY_{i}").strip()
         # Skip blanks and the .env.example placeholder text
         if not raw or raw == "your_pricesapi_key_here":
             continue

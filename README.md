@@ -217,10 +217,34 @@ python features.py        # print the feature table to the terminal
 ├── features.py           # Analysis-ready DataFrame
 ├── scheduler.py          # Local hourly / --once runner
 ├── app.py                # Streamlit dashboard logic
-├── streamlit_app.py      # Community Cloud entry point
+├── streamlit_app.py      # Community Cloud entry point (use this as Main file)
+├── .streamlit/config.toml
 └── data/
     └── prices.db         # Snapshot history (tracked for Actions persistence)
 ```
+
+---
+
+## Deploy on Streamlit Community Cloud
+
+1. Make the GitHub repo **public** (free Cloud requires it).
+2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**.
+3. Set:
+   - Repository: `shrutidoshi94/Cross-Market-iPhone-Price-Gap-Analysis`
+   - Branch: `main`
+   - **Main file path: `streamlit_app.py`**
+4. Under **Advanced settings → Secrets**, paste:
+
+```toml
+EXCHANGERATE_HOST_ACCESS_KEY = "your_key"
+PRICESAPI_KEY_1 = "your_key"
+PRICESAPI_KEY_2 = "your_key"
+PRICESAPI_KEY_3 = "your_key"
+PRICESAPI_KEY_4 = "your_key"
+PRICESAPI_KEY_5 = "your_key"
+```
+
+5. Deploy. The app reads `data/prices.db` from the repo (updated by GitHub Actions). After Actions commits new data, use **Reboot app** on Streamlit Cloud to pick it up.
 
 ---
 

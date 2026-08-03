@@ -196,11 +196,14 @@ def _rates_from_usd_quotes(quotes: dict[str, float]) -> dict[str, float]:
 
 def _get_access_key() -> str:
     """Return the exchangerate.host access key or raise a clear error."""
-    access_key = os.getenv("EXCHANGERATE_HOST_ACCESS_KEY", "").strip()
+    # Import here to pick up Streamlit secrets lazily on Community Cloud
+    from config import get_env
+
+    access_key = get_env("EXCHANGERATE_HOST_ACCESS_KEY").strip()
     if not access_key:
         raise RuntimeError(
             "EXCHANGERATE_HOST_ACCESS_KEY is not set. "
-            "Add it to your .env file (see .env.example)."
+            "Add it to .env locally or to Streamlit Cloud secrets."
         )
     return access_key
 

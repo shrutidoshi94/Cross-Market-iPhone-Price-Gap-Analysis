@@ -42,7 +42,11 @@ COUNTRY_LABELS = {
 @st.cache_data(ttl=60)
 def load_features() -> pd.DataFrame:
     """Load engineered features; cache briefly so the UI stays snappy."""
-    return build_features()
+    try:
+        return build_features()
+    except Exception as exc:  # noqa: BLE001 — surface in UI, don't crash Cloud
+        st.error(f"Could not build features from the database: {exc}")
+        return pd.DataFrame()
 
 
 def _format_money(value: float | None) -> str:
@@ -282,8 +286,9 @@ def main() -> None:
 
     if df.empty:
         st.warning(
-            "No price snapshots in the database yet. "
-            "Run `python collect.py --once` or `python scheduler.py --once` first."
+            "No clean 512GB price snapshots in the database yet. "
+            "GitHub Actions collects twice daily — wait for a successful run, "
+            "or trigger **Actions → Collect prices → Run workflow**, then reboot this app."
         )
         render_disclaimer()
         return
