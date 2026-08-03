@@ -76,8 +76,9 @@ def render_header(df: pd.DataFrame) -> None:
     with left:
         st.title(title)
         st.caption(
-            f"Tracked SKU: **{PRODUCT_QUERY}** · "
-            "Cross-market prices normalized to USD"
+            f"Tracked SKU: **{PRODUCT_QUERY}** only · "
+            "Other storages/models and outlier prices are filtered out · "
+            "USD-normalized"
         )
         if last_updated is not None:
             # pandas Timestamp → readable UTC string
@@ -168,6 +169,7 @@ def render_gap_table(latest: pd.DataFrame, countries: list[str]) -> None:
             "Market": subset["country"].map(lambda c: COUNTRY_LABELS.get(c, c)),
             "Country": subset["country"],
             "Retailer": subset["retailer"],
+            "Title": subset["title"],
             "Local price": subset.apply(
                 lambda r: f"{r['price']:,.2f} {r['currency']}"
                 if pd.notna(r["price"])
@@ -180,9 +182,28 @@ def render_gap_table(latest: pd.DataFrame, countries: list[str]) -> None:
             "Arbitrage score": subset["arbitrage_score"].map(
                 lambda v: f"{v:,.1f}" if pd.notna(v) else "—"
             ),
+            "Source page": subset["source_url"]
+            if "source_url" in subset.columns
+            else None,
         }
     )
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Source page": st.column_config.LinkColumn(
+                "Source page",
+                help="Open the retailer listing to verify the SKU and price",
+                display_text="Open listing",
+            ),
+            "Title": st.column_config.TextColumn(
+                "Title",
+                help="Must be iPhone 17 Pro Max 512GB",
+                width="medium",
+            ),
+        },
+    )
 
 
 def render_volatility(df: pd.DataFrame, countries: list[str]) -> None:

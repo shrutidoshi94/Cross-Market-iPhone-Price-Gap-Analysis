@@ -30,7 +30,7 @@ This project answers a concrete version of that question for one flagship iPhone
 **Important limitations**
 
 1. **Snapshot-based history** — PricesAPI returns *current* matches, not a long historical series. The time series in this repo is whatever we collect ourselves (GitHub Actions every 12 hours, or local `scheduler.py`). Early charts will look sparse until a few days of snapshots exist.
-2. **Search matching** — Queries are free-text. The top candidate may not always be the exact 512GB / Cosmic Orange configuration in every market.
+2. **Search matching** — Queries are free-text, but collectors **reject** any listing whose title is not clearly **iPhone 17 Pro Max 512GB** (other storages and models are dropped). Cosmic Orange is preferred when available. Each kept row stores a retailer **source page URL** for verification. Prices outside per-currency sanity bands are treated as outliers and ignored.
 3. **VAT / sales tax** — Shelf prices may include or exclude tax depending on country and retailer. Cross-market “savings” can be overstated or understated.
 4. **Duty & shipping are assumptions** — `arbitrage_score` subtracts rough friction from `features.py` (`DUTY_ESTIMATES`, `SHIPPING_ESTIMATES_USD`). These are **not** customs quotes; they exist to stop a naïve “cheapest sticker price wins” conclusion. Tune them before trusting the callout.
 5. **Rate limits** — PricesAPI Personal tier is tight (credits + per-minute caps). The project rotates up to five API keys and backs off on HTTP 429.
@@ -166,7 +166,20 @@ streamlit run app.py
 
 Then open the local URL Streamlit prints (usually `http://localhost:8501`).
 
-To host for free later: [Streamlit Community Cloud](https://streamlit.io/cloud) pointed at `app.py`. Add the same keys under app **Secrets**. Note: free Streamlit Cloud works most easily with a **public** repo; this repo can stay private for Actions-only collection.
+To host for free: [Streamlit Community Cloud](https://share.streamlit.io) → **New app** → pick this repo → **Main file path:** `streamlit_app.py`.
+
+Add secrets (App settings → Secrets):
+
+```toml
+PRICESAPI_KEY_1 = "..."
+PRICESAPI_KEY_2 = "..."
+PRICESAPI_KEY_3 = "..."
+PRICESAPI_KEY_4 = "..."
+PRICESAPI_KEY_5 = "..."
+EXCHANGERATE_HOST_ACCESS_KEY = "..."
+```
+
+Free Streamlit Cloud works most easily with a **public** repo (this one is private today — Settings → Change visibility if you want to deploy). The dashboard reads `data/prices.db` from the repo, which Actions updates twice daily.
 
 ### Useful one-liners
 
@@ -203,7 +216,8 @@ python features.py        # print the feature table to the terminal
 ├── fx.py                 # FX fetch + normalize_to_usd
 ├── features.py           # Analysis-ready DataFrame
 ├── scheduler.py          # Local hourly / --once runner
-├── app.py                # Streamlit dashboard
+├── app.py                # Streamlit dashboard logic
+├── streamlit_app.py      # Community Cloud entry point
 └── data/
     └── prices.db         # Snapshot history (tracked for Actions persistence)
 ```

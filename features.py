@@ -15,6 +15,7 @@ from typing import Optional
 
 import pandas as pd
 
+from collect import is_plausible_price, is_target_sku
 from config import DATABASE_PATH
 from fx import ensure_rates_for_dates, normalize_to_usd
 
@@ -78,21 +79,33 @@ def load_price_snapshots(db_path: Optional[Path] = None) -> pd.DataFrame:
         return pd.DataFrame()
 
     with sqlite3.connect(path) as conn:
+        # source_url may be absent on very old DBs — select * then normalize
         df = pd.read_sql_query(
-            """
-            SELECT id, country, retailer, price, currency, rating, timestamp, title
-            FROM price_snapshots
-            ORDER BY timestamp ASC, country ASC
-            """,
+            "SELECT * FROM price_snapshots ORDER BY timestamp ASC, country ASC",
             conn,
         )
 
     if df.empty:
         return df
 
+    if "source_url" not in df.columns:
+        df["source_url"] = None
+
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, format="ISO8601")
     df["country"] = df["country"].str.upper()
     df["currency"] = df["currency"].str.upper()
+
+    # Defense in depth: drop rows that are not 512GB Pro Max or are price outliers
+    before = len(df)
+    sku_ok = df["title"].map(is_target_sku)
+    price_ok = [
+        is_plausible_price(price, currency)
+        for price, currency in zip(df["price"], df["currency"])
+    ]
+    df = df.loc[sku_ok & price_ok].copy()
+    dropped = before - len(df)
+    if dropped:
+        logger.info("Dropped %d unclean snapshot row(s) during load", dropped)
     return df
 
 
