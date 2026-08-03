@@ -20,6 +20,7 @@ import argparse
 import logging
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,32 +42,38 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT_SECONDS = 95
 
 # Max retries for a single country after 429 / transient errors
-MAX_RETRIES = 2
+MAX_RETRIES = 3
 
 # Ask for the max candidates so we can filter down to the right SKU
 SEARCH_LIMIT = 5
-OFFERS_LIMIT = 5
+OFFERS_LIMIT = 20  # API max; storage often appears only on offer URLs
 
 SEARCH_URL = f"{PRICESAPI_BASE_URL}/products/search"
 
 # Plausible local-currency shelf prices for iPhone 17 Pro Max 512GB.
 # Anything outside these bands is treated as a wrong SKU / accessory / error.
+# (Also rejects garbage API prices like 6e18 and subsidized €169 contract deals.)
 PRICE_BOUNDS_LOCAL: Dict[str, Tuple[float, float]] = {
     "USD": (1100.0, 2200.0),
     "GBP": (1000.0, 2000.0),
-    "EUR": (1100.0, 2300.0),
+    "EUR": (1000.0, 2300.0),
     "CAD": (1600.0, 3200.0),
     "AUD": (2000.0, 4000.0),
     "JPY": (200_000.0, 400_000.0),
     "INR": (130_000.0, 250_000.0),
 }
 
+# Locale-aware storage: GB (EN) and Go (FR). Allow hyphens in model names.
 _STORAGE_REJECT = re.compile(
-    r"\b(?:128|256)\s*[- ]?\s*gb\b|\b(?:1|2)\s*[- ]?\s*tb\b",
+    r"(?:128|256)\s*[- ]?\s*(?:gb|go)\b|(?:1|2)\s*[- ]?\s*tb\b",
     re.IGNORECASE,
 )
-_STORAGE_512 = re.compile(r"\b512\s*[- ]?\s*gb\b", re.IGNORECASE)
-_MODEL_OK = re.compile(r"iphone\s*17\s*pro\s*max", re.IGNORECASE)
+_STORAGE_512 = re.compile(r"512\s*[- ]?\s*(?:gb|go)\b", re.IGNORECASE)
+_MODEL_OK = re.compile(r"iphone\s*-?\s*17\s*-?\s*pro\s*-?\s*max", re.IGNORECASE)
+_COSMIC_ORANGE = re.compile(
+    r"cosmic\s*orange|orange\s*cosmique|kosmische\s*orange",
+    re.IGNORECASE,
+)
 
 
 def _coerce_price(value: Any) -> Optional[float]:
@@ -159,37 +166,70 @@ def save_snapshot(db_path: Path, row: Dict[str, Any]) -> None:
         conn.commit()
 
 
-def is_target_sku(title: Optional[str]) -> bool:
+def is_target_sku(title: Optional[str], source_url: Optional[str] = None) -> bool:
     """
-    Return True only for iPhone 17 Pro Max **512GB** titles.
+    Return True for iPhone 17 Pro Max **512GB/512Go** listings.
 
-    Rejects other storages (128/256GB, 1TB, 2TB) and non–Pro Max models.
+    Storage may appear in the title and/or the retailer URL (common when the
+    API returns a generic "iPhone 17 Pro Max" product with mixed offers).
     """
-    if not title:
-        return False
-    if not _MODEL_OK.search(title):
-        return False
-    if _STORAGE_REJECT.search(title):
-        return False
-    if not _STORAGE_512.search(title):
-        return False
-    return True
+    return is_512_pro_max_listing(title, source_url)
 
 
-def prefers_cosmic_orange(title: Optional[str]) -> bool:
-    """True when the listing mentions Cosmic Orange (preferred color)."""
-    return bool(title and re.search(r"cosmic\s*orange", title, re.IGNORECASE))
+def is_512_pro_max_listing(title: Optional[str], source_url: Optional[str] = None) -> bool:
+    """
+    Validate model + 512GB storage using title and/or offer URL.
+
+    Rules:
+      - Must look like iPhone 17 Pro Max (hyphens allowed)
+      - Offer URL wins for storage when it mentions a size
+      - Accept 512GB / 512Go; reject 256GB/Go, 1TB, 2TB
+    """
+    title = title or ""
+    url = source_url or ""
+    blob = f"{title} {url}"
+
+    if not _MODEL_OK.search(title) and not _MODEL_OK.search(url):
+        return False
+
+    url_has_512 = bool(_STORAGE_512.search(url))
+    url_has_other = bool(_STORAGE_REJECT.search(url))
+    title_has_512 = bool(_STORAGE_512.search(title))
+    title_has_other = bool(_STORAGE_REJECT.search(title))
+
+    # URL is the most specific signal for an individual offer
+    if url_has_other:
+        return False
+    if url_has_512:
+        return True
+
+    # No storage in URL — require an explicit 512 in the title, and no other size
+    if title_has_other:
+        return False
+    if title_has_512:
+        return True
+
+    # Generic "Pro Max" with no storage signal anywhere — reject (ambiguous SKU)
+    _ = blob  # kept for readability / future signals
+    return False
+
+
+def prefers_cosmic_orange(*texts: Optional[str]) -> bool:
+    """True when any text mentions Cosmic Orange (incl. FR/DE variants)."""
+    return any(t and _COSMIC_ORANGE.search(t) for t in texts)
 
 
 def is_plausible_price(price: Optional[float], currency: Optional[str]) -> bool:
     """Reject outlier / wrong-SKU prices using per-currency sanity bands."""
     if price is None or currency is None:
         return False
+    # Hard cap against obviously corrupted API values
+    if float(price) <= 0 or float(price) > 1_000_000:
+        return False
     bounds = PRICE_BOUNDS_LOCAL.get(currency.upper())
     if bounds is None:
-        # Unknown currency: allow but log — better than silently dropping
         logger.warning("No price bounds for currency=%s — accepting %.2f", currency, price)
-        return price > 0
+        return True
     low, high = bounds
     return low <= float(price) <= high
 
@@ -214,7 +254,10 @@ def _offer_candidates(product: Dict[str, Any]) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
 
     for offer in offers:
-        url = offer.get("url") or offer.get("seller_url") or product_url
+        url = offer.get("url") or ""
+        # Prefer the product page URL over the bare seller homepage
+        if not url or url.rstrip("/") == (offer.get("seller_url") or "").rstrip("/"):
+            url = offer.get("url") or product_url or offer.get("seller_url")
         price = _coerce_price(offer.get("price"))
         if price is None:
             price = product_price
@@ -230,7 +273,7 @@ def _offer_candidates(product: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
         )
 
-    # Always include the product-level headline as a fallback candidate
+    # Product-level headline fallback (only useful if title itself has 512)
     candidates.append(
         {
             **base,
@@ -250,31 +293,34 @@ def select_best_match(products: List[Dict[str, Any]]) -> Optional[Dict[str, Any]
     """
     Pick the best 512GB Pro Max candidate from an API product list.
 
-    Preference order:
-      1. Valid SKU title (must include 512GB)
-      2. Plausible local price (outlier filter)
-      3. Has a product page URL
-      4. Cosmic Orange preferred
-      5. Cheapest remaining price
+    Inspects each offer's URL for storage (API often omits GB from the title).
+    Preference: Cosmic Orange → cheaper plausible price.
     """
     scored: List[Tuple[Tuple[int, float], Dict[str, Any]]] = []
 
     for product in products:
-        title = product.get("title")
-        if not is_target_sku(title):
-            logger.info("Reject SKU mismatch: %r", title)
-            continue
+        title = product.get("title") or ""
+        if not _MODEL_OK.search(title):
+            # Still allow offers whose own URL says iphone-17-pro-max
+            pass
 
         for cand in _offer_candidates(product):
             price = cand.get("price")
             currency = cand.get("currency")
             url = cand.get("source_url")
 
+            if not is_512_pro_max_listing(title, url):
+                logger.info(
+                    "Reject SKU mismatch: title=%r url=%r",
+                    title,
+                    (url or "")[:120],
+                )
+                continue
             if price is None:
-                logger.info("Reject missing price: %r", title)
+                logger.info("Reject missing price: title=%r url=%r", title, (url or "")[:120])
                 continue
             if not currency:
-                logger.info("Reject missing currency: %r", title)
+                logger.info("Reject missing currency: title=%r", title)
                 continue
             if not is_plausible_price(price, currency):
                 logger.info(
@@ -289,9 +335,13 @@ def select_best_match(products: List[Dict[str, Any]]) -> Optional[Dict[str, Any]
                 logger.info("Reject missing source_url: %r", title)
                 continue
 
-            # Sort key: prefer Cosmic Orange (0), then lower price
-            color_rank = 0 if prefers_cosmic_orange(title) else 1
-            scored.append(((color_rank, float(price)), cand))
+            color_rank = 0 if prefers_cosmic_orange(title, url) else 1
+            # Enrich displayed title when only the URL carried the 512 signal
+            display_title = title
+            if not _STORAGE_512.search(title) and _STORAGE_512.search(url or ""):
+                display_title = f"{title} (512GB via listing URL)"
+            enriched = {**cand, "title": display_title}
+            scored.append(((color_rank, float(price)), enriched))
 
     if not scored:
         return None
@@ -387,6 +437,8 @@ def fetch_product_for_country(
             if response.status_code in (401, 403):
                 return None
             if attempt <= MAX_RETRIES:
+                # Scraper 503s are often transient (captcha / no_cards)
+                time.sleep(min(5 * attempt, 20))
                 continue
             return None
 

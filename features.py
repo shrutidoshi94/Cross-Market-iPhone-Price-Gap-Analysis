@@ -97,7 +97,10 @@ def load_price_snapshots(db_path: Optional[Path] = None) -> pd.DataFrame:
 
     # Defense in depth: drop rows that are not 512GB Pro Max or are price outliers
     before = len(df)
-    sku_ok = df["title"].map(is_target_sku)
+    sku_ok = [
+        is_target_sku(title, url)
+        for title, url in zip(df["title"], df["source_url"])
+    ]
     price_ok = [
         is_plausible_price(price, currency)
         for price, currency in zip(df["price"], df["currency"])
