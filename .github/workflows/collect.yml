@@ -2,18 +2,17 @@
 #
 # Budget (designed to stay under free limits):
 #   - PricesAPI: 8 countries × 2 runs/day × 30 days ≈ 480 credits/month
-#     (5 Personal keys × 1,000 = 5,000 credits/month available)
-#   - GitHub Actions (private): ~60 jobs/month × ~10–15 min ≈ 600–900 min
-#     (free private allowance is 2,000 min/month on GitHub Free)
-#   - Git storage: SQLite stays tiny (KB–low MB); only data/prices.db is committed
+#   - GitHub Actions: ~60 jobs/month × 10–15 min ≈ 600–900 min
+#   - Git storage: only data/prices.db is committed (stays small)
 #
-# Schedule: every 12 hours UTC. Manual runs: Actions → Collect prices → Run workflow.
+# Schedule: every 12 hours UTC.
+# Manual: Actions → Collect prices → Run workflow
+# Important: use "Run workflow" (not "Re-run jobs") so the latest YAML is used.
 
 name: Collect prices
 
 on:
   schedule:
-    # 00:00 and 12:00 UTC → 2 cycles/day
     - cron: "0 0,12 * * *"
   workflow_dispatch:
 
@@ -33,9 +32,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Needed so the job can push commits back to main
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -60,44 +59,43 @@ jobs:
       - name: Commit and push updated database
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          mkdir -p data
-          git add data/prices.db
-          if git diff --staged --quiet; then
-            echo "No database changes to commit."
+          if [ ! -f data/prices.db ]; then
+            echo "No database file found — nothing to commit."
             exit 0
           fi
 
-          git commit -m "data: update price snapshots from scheduled collection"
+          # Keep the DB produced by this job, even if we reset the git tree
+          cp data/prices.db /tmp/prices-collected.db
 
-          # main may have moved (local push / prior Action). Rebase, then push.
-          # On binary DB conflicts, keep THIS job's newly collected database.
-          for attempt in 1 2 3; do
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3 4 5; do
             echo "Push attempt ${attempt}..."
+
             git fetch origin main
-            if ! git rebase origin/main; then
-              if git status --porcelain | grep -q "data/prices.db"; then
-                echo "Resolving prices.db conflict in favor of this collection run"
-                git checkout --theirs -- data/prices.db
-                git add data/prices.db
-                GIT_EDITOR=true git rebase --continue
-              else
-                echo "Unexpected rebase conflict"
-                git rebase --abort || true
-                exit 1
-              fi
+            git reset --hard origin/main
+
+            mkdir -p data
+            cp /tmp/prices-collected.db data/prices.db
+            git add data/prices.db
+
+            if git diff --staged --quiet; then
+              echo "Database unchanged vs origin/main — nothing to commit."
+              exit 0
             fi
+
+            git commit -m "data: update price snapshots from scheduled collection"
 
             if git push origin HEAD:main; then
               echo "Push succeeded"
               exit 0
             fi
 
-            echo "Push rejected — retrying after short wait"
-            sleep 5
+            echo "Push rejected (main moved). Retrying..."
+            sleep $((attempt * 3))
           done
 
-          echo "Failed to push after retries"
+          echo "Failed to push database after retries"
           exit 1
